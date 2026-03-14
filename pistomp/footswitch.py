@@ -46,7 +46,8 @@ class Footswitch(controller.Controller):
                                     "previous_snapshot":LongpressInfo(),
                                     "toggle_bypass":LongpressInfo(),
                                     "set_mod_tap_tempo":LongpressInfo(),
-                                    "toggle_tap_tempo_enable":LongpressInfo()}
+                                    "toggle_tap_tempo_enable":LongpressInfo(),
+                                    "toggle_tuner":LongpressInfo()}
 
         # Static list of possible callbacks from the handler
         if len(cls.callbacks) == 0:
@@ -85,7 +86,7 @@ class Footswitch(controller.Controller):
             info.timestamps.clear()
 
     def __init__(self, id, led_pin, pixel, midi_CC, midi_channel, midiout, refresh_callback,
-                 gpio_input=None, adc_input=None, spi=None, taptempo=None):
+                 gpio_input=None, adc_input=None, spi=None, taptempo=None, longpress_time=None):
         super(Footswitch, self).__init__(midi_channel, midi_CC)
         self.id = id
         self.display_label = None
@@ -113,7 +114,9 @@ class Footswitch(controller.Controller):
 
         self.adc_switch = None
         if adc_input is not None:
-            self.adc_switch = analogswitch.AnalogSwitch(spi, adc_input, 800, self.pressed, taptempo = self.taptempo)
+            self.adc_switch = analogswitch.AnalogSwitch(spi, adc_input, 800, self.pressed,
+                                                        taptempo=self.taptempo,
+                                                        longpress_time=longpress_time)
 
         if led_pin is not None:
             try:

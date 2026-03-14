@@ -73,6 +73,11 @@ class Modhandler(Handler):
         self.current = None  # pointer to Current class
         self.lcd = None
 
+        # Tuner
+        self.tuner_active = False
+        self.tuner_audio = None
+        self.tuner_saved_volume = None
+
         # Backup
         self.backup_dir = "/media/usb0/backups"
         self.backup_file = "pistomp_backup.zip"
@@ -97,7 +102,8 @@ class Modhandler(Handler):
                           "next_snapshot": self.preset_incr_and_change,
                           "previous_snapshot": self.preset_decr_and_change,
                           "toggle_bypass": self.system_toggle_bypass,
-                          "toggle_tap_tempo_enable": self.toggle_tap_tempo_enable
+                          "toggle_tap_tempo_enable": self.toggle_tap_tempo_enable,
+                          "toggle_tuner": self.toggle_tuner
         }
 
     def __del__(self):
@@ -202,6 +208,14 @@ class Modhandler(Handler):
             self.temperature = "unknown"
 
     def poll_lcd_updates(self):
+        if self.tuner_active and self.tuner_audio:
+            self.lcd.tuner_update(
+                self.tuner_audio.note_name,
+                self.tuner_audio.octave,
+                self.tuner_audio.cents,
+                self.tuner_audio.frequency,
+                self.tuner_audio.confidence
+            )
         if self.lcd:
             self.lcd.poll_updates()
 
@@ -850,3 +864,50 @@ class Modhandler(Handler):
     def toggle_tap_tempo_enable(self, *argv):
         self.hardware.toggle_tap_tempo_enable(self.get_bpm())
         self.lcd.update_footswitches()
+
+    def toggle_tuner(self, *argv):
+        if self.tuner_active:
+            self._tuner_deactivate()
+        else:
+            self._tuner_activate()
+
+    def _tuner_activate(self):
+        from pistomp.tuner import TunerAudio
+
+        self.tuner_active = True
+
+        # Mute output: save current volume, set to minimum
+        self.tuner_saved_volume = self.audiocard.get_volume_parameter(self.audiocard.MASTER)
+        self.audiocard.set_volume_parameter(self.audiocard.MASTER, -100, store=False)
+
+        # Start pitch detection
+        self.tuner_audio = TunerAudio()
+        if not self.tuner_audio.start():
+            logging.error("Failed to start tuner audio")
+            # Still show the UI so the user knows something happened and can deactivate
+            self.tuner_audio = None
+
+        # Show tuner UI
+        if self.lcd:
+            self.lcd.tuner_show()
+
+        logging.info("Tuner activated")
+
+    def _tuner_deactivate(self):
+        self.tuner_active = False
+
+        # Stop pitch detection
+        if self.tuner_audio:
+            self.tuner_audio.stop()
+            self.tuner_audio = None
+
+        # Hide tuner UI
+        if self.lcd:
+            self.lcd.tuner_hide()
+
+        # Restore output volume
+        if self.tuner_saved_volume is not None:
+            self.audiocard.set_volume_parameter(self.audiocard.MASTER, self.tuner_saved_volume, store=False)
+            self.tuner_saved_volume = None
+
+        logging.info("Tuner deactivated")

@@ -23,7 +23,7 @@ FALLING_THRESHOLD = 800  # ASSUMES 10-bit ADC, can be changed for debounce handl
 
 class AnalogSwitch(analogcontrol.AnalogControl):
 
-    def __init__(self, spi, adc_channel, tolerance, callback, taptempo=None):
+    def __init__(self, spi, adc_channel, tolerance, callback, taptempo=None, longpress_time=None):
         super(AnalogSwitch, self).__init__(spi, adc_channel, tolerance)
         #self.value = None          # this keeps track of the last value, do we still need this?
         self.callback = callback
@@ -31,6 +31,7 @@ class AnalogSwitch(analogcontrol.AnalogControl):
         self.start_time = 0
         self.duration = 0
         self.taptempo = taptempo
+        self.longpress_time = longpress_time if longpress_time else LONG_PRESS_TIME
 
     # Override of base class method
     def refresh(self):
@@ -47,7 +48,7 @@ class AnalogSwitch(analogcontrol.AnalogControl):
             elif self.state is not switchstate.Value.LONGPRESSED:
                 # not longpress yet, but check how long
                 self.duration = time.monotonic() - self.start_time
-                if self.duration >= LONG_PRESS_TIME:
+                if self.duration >= self.longpress_time:
                     self.state = switchstate.Value.LONGPRESSED
                     self.callback(switchstate.Value.LONGPRESSED)
         elif new_value > FALLING_THRESHOLD:

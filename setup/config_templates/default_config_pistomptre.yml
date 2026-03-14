@@ -25,6 +25,7 @@ hardware:
   # midi_CC: <integer>            The MIDI CC message to be sent when switch is clicked (optional)
   # longpress: <callback_name>    The name of a handler method to call when switch is long-pressed (optional)
   #                               longpress can be a list enclosed with []'s
+  # longpress_time: <float>       Override the longpress hold duration in seconds (optional, default 0.5)
   #
   footswitches:
   - id: 0
@@ -41,6 +42,8 @@ hardware:
     adc_input: 2
     ledstrip_position: 2
     midi_CC: 62
+    longpress: toggle_tuner
+    longpress_time: 2.0
   - id: 3
     adc_input: 3
     ledstrip_position: 3

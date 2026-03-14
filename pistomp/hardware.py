@@ -189,6 +189,7 @@ class Hardware:
             midi_cc = Util.DICT_GET(f, Token.MIDI_CC)
             id = Util.DICT_GET(f, Token.ID)
             led_position = Util.DICT_GET(f, Token.LEDSTRIP_POSITION)
+            longpress_time = Util.DICT_GET(f, Token.LONGPRESS_TIME)
 
             pixel = None
             if self.ledstrip and led_position is not None:
@@ -208,14 +209,15 @@ class Hardware:
                 fs = Footswitch.Footswitch(id if id else idx, gpio_output, pixel, midi_cc, midi_channel,
                                            self.midiout, refresh_callback=self.refresh_callback,
                                            adc_input=adc_input, spi=self.spi,
-                                           taptempo = taptempo)
+                                           taptempo=taptempo,
+                                           longpress_time=longpress_time)
                 logging.debug("Created Footswitch on ADC input: %d, Midi Chan: %d, CC: %s" %
                               (adc_input, midi_channel, midi_cc))
             elif gpio_input is not None:
                 fs = Footswitch.Footswitch(id if id else idx, gpio_output, pixel, midi_cc, midi_channel,
                                            self.midiout, refresh_callback=self.refresh_callback,
                                            gpio_input=gpio_input,
-                                           taptempo = taptempo)
+                                           taptempo=taptempo)
                 logging.debug("Created Footswitch on GPIO input: %d, Midi Chan: %d, CC: %s" %
                               (gpio_input, midi_channel, midi_cc))
 

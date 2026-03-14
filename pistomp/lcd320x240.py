@@ -31,6 +31,65 @@ from pistomp.footswitch import Footswitch  # TODO would like to avoid this modul
 
 #import traceback
 
+
+class TunerMeterWidget(Widget):
+    """Custom widget that draws a horizontal cent deviation meter for the tuner.
+
+    Displays a bar from -50 to +50 cents with color-coded indicator:
+      Green  (±5 cents)  — in tune
+      Yellow (±5–15 cents) — close
+      Red    (±15–50 cents) — out of tune
+    """
+
+    def __init__(self, **kwargs):
+        self.cents = 0.0
+        super(TunerMeterWidget, self).__init__(**kwargs)
+
+    def set_cents(self, cents):
+        self.cents = max(-50.0, min(50.0, cents))
+        self.refresh()
+
+    def _draw(self, image, draw, real_box):
+        x0 = real_box.x0
+        y0 = real_box.y0
+        w = real_box.width
+        h = real_box.height
+        cx = x0 + w // 2
+        cy = y0 + h // 2
+        bar_h = 12
+        bar_top = cy - bar_h // 2
+
+        # Background track
+        draw.rectangle([x0, bar_top, x0 + w, bar_top + bar_h], fill=(40, 40, 40))
+
+        # Center tick mark
+        draw.rectangle([cx - 1, y0, cx + 1, y0 + h], fill=(100, 100, 100))
+
+        # Indicator position: map cents (-50..+50) to pixel x
+        indicator_x = cx + int((self.cents / 50.0) * (w // 2))
+
+        # Indicator color
+        abs_cents = abs(self.cents)
+        if abs_cents <= 5:
+            color = (0, 255, 0)
+        elif abs_cents <= 15:
+            color = (255, 255, 0)
+        else:
+            color = (255, 60, 60)
+
+        # Draw indicator (wide marker)
+        ind_w = 6
+        ind_left = max(x0, indicator_x - ind_w // 2)
+        ind_right = min(x0 + w, indicator_x + ind_w // 2)
+        draw.rectangle([ind_left, y0 + 2, ind_right, y0 + h - 2], fill=color)
+
+        # Scale labels
+        font = ImageFont.truetype("DejaVuSans.ttf", 10)
+        draw.text((x0, y0 + h - 12), "-50", fill=(80, 80, 80), font=font)
+        draw.text((cx - 4, y0 + h - 12), "0", fill=(80, 80, 80), font=font)
+        draw.text((x0 + w - 18, y0 + h - 12), "+50", fill=(80, 80, 80), font=font)
+
+
 class Lcd(abstract_lcd.Lcd):
 
     def __init__(self, cwd, handler=None, flip=False):
@@ -115,6 +174,15 @@ class Lcd(abstract_lcd.Lcd):
         self.pstack.push_panel(self.footswitch_panel)
 
         self.pedalboards = {}
+
+        # Tuner
+        self.tuner_panel = None
+        self.tuner_font = ImageFont.truetype("DejaVuSans-Bold.ttf", 80)
+        self.tuner_octave_font = ImageFont.truetype("DejaVuSans.ttf", 24)
+        self.w_tuner_note = None
+        self.w_tuner_octave = None
+        self.w_tuner_meter = None
+        self.w_tuner_freq = None
 
         self.splash_show(True)
 
@@ -620,6 +688,89 @@ class Lcd(abstract_lcd.Lcd):
                        text="pi Stomp!", font=self.splash_font, parent=self.splash_panel)
         self.w_splash.set_foreground(self.color_splash_up if boot is True else self.color_splash_down)
         self.splash_panel.refresh()
+
+    #
+    # Tuner
+    #
+    def tuner_show(self):
+        """Create and display the full-screen tuner panel."""
+        if self.tuner_panel is not None:
+            return  # already showing
+
+        self.tuner_panel = Panel(box=Box.xywh(0, 0, self.display_width, self.display_height))
+
+        # Title
+        TextWidget(box=Box.xywh(0, 4, self.display_width, 30),
+                   text="TUNER", font=self.title_font,
+                   parent=self.tuner_panel)
+
+        # Note name (large, centered)
+        self.w_tuner_note = TextWidget(box=Box.xywh(0, 40, self.display_width, 100),
+                                       text="--", font=self.tuner_font,
+                                       parent=self.tuner_panel)
+
+        # Octave number (below note, centered)
+        self.w_tuner_octave = TextWidget(box=Box.xywh(0, 130, self.display_width, 28),
+                                          text="", font=self.tuner_octave_font,
+                                          parent=self.tuner_panel)
+
+        # Cent deviation meter (custom drawn widget)
+        self.w_tuner_meter = TunerMeterWidget(box=Box.xywh(20, 165, 280, 30),
+                                               parent=self.tuner_panel)
+
+        # Frequency display
+        self.w_tuner_freq = TextWidget(box=Box.xywh(0, 200, self.display_width, 20),
+                                        text="", font=self.tiny_font,
+                                        parent=self.tuner_panel)
+        self.w_tuner_freq.set_foreground((150, 150, 150))
+
+        # Hint text
+        w_hint = TextWidget(box=Box.xywh(0, 222, self.display_width, 18),
+                             text="Hold FS3 (2s) to exit", font=self.tiny_font,
+                             parent=self.tuner_panel)
+        w_hint.set_foreground((80, 80, 80))
+
+        self.pstack.push_panel(self.tuner_panel)
+        self.tuner_panel.refresh()
+
+    def tuner_update(self, note, octave, cents, frequency, confidence):
+        """Update the tuner display with new pitch data."""
+        if self.tuner_panel is None:
+            return
+
+        if note is not None:
+            self.w_tuner_note.set_text(note)
+            self.w_tuner_octave.set_text(str(octave) if octave is not None else "")
+            self.w_tuner_freq.set_text("%.1f Hz" % frequency)
+
+            # Color the note name based on how close to in-tune
+            abs_cents = abs(cents)
+            if abs_cents <= 5:
+                color = (0, 255, 0)       # green — in tune
+            elif abs_cents <= 15:
+                color = (255, 255, 0)     # yellow — close
+            else:
+                color = (255, 60, 60)     # red — out of tune
+            self.w_tuner_note.set_foreground(color)
+        else:
+            self.w_tuner_note.set_text("--")
+            self.w_tuner_note.set_foreground((100, 100, 100))
+            self.w_tuner_octave.set_text("")
+            self.w_tuner_freq.set_text("")
+            cents = 0.0
+
+        self.w_tuner_meter.set_cents(cents)
+        self.tuner_panel.refresh()
+
+    def tuner_hide(self):
+        """Remove the tuner panel from the display."""
+        if self.tuner_panel is not None:
+            self.pstack.pop_panel(self.tuner_panel)
+            self.tuner_panel = None
+            self.w_tuner_note = None
+            self.w_tuner_octave = None
+            self.w_tuner_meter = None
+            self.w_tuner_freq = None
 
     def cleanup(self):
         self.pstack.pop_panel(None)  # current panel

@@ -92,3 +92,6 @@ class Handler:
 
     def configure_wifi_credentials(self, ssid, password):
         raise NotImplementedError()
+
+    def toggle_tuner(self):
+        raise NotImplementedError()
