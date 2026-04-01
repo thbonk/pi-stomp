@@ -61,40 +61,60 @@ def _freq_to_note(frequency):
 
 
 def _yin_pitch(signal, sample_rate, threshold=0.15):
-    """YIN pitch detection algorithm.
+    """YIN pitch detection with FFT-accelerated difference function.
+
+    Uses FFT cross-correlation to compute the difference function in O(n log n)
+    instead of the naive O(n²) loop. This enables larger buffer sizes and faster
+    processing on the Pi, both of which improve pitch accuracy.
 
     Returns (frequency, confidence) or (0.0, 0.0) if no pitch detected.
 
     Based on: De Cheveigné, A. & Kawahara, H. (2002).
     "YIN, a fundamental frequency estimator for speech and music."
     """
-    buf_size = len(signal)
-    half = buf_size // 2
+    N = len(signal)
+    W = N // 2
 
-    # Step 1: Difference function
-    # d(tau) = sum over j of (x[j] - x[j+tau])^2
-    diff = np.zeros(half, dtype=np.float64)
-    for tau in range(1, half):
-        delta = signal[:half] - signal[tau:tau + half]
-        diff[tau] = np.sum(delta * delta)
+    # --- Difference function via FFT ---
+    # d(τ) = Σ_{j=0}^{W-1} (x[j] - x[j+τ])²
+    #       = Σ x[j]² + Σ x[j+τ]² - 2·Σ x[j]·x[j+τ]
 
-    # Step 2: Cumulative mean normalized difference function
-    cmnd = np.zeros(half, dtype=np.float64)
-    cmnd[0] = 1.0
-    running_sum = 0.0
-    for tau in range(1, half):
-        running_sum += diff[tau]
-        if running_sum == 0:
-            cmnd[tau] = 1.0
-        else:
-            cmnd[tau] = diff[tau] * tau / running_sum
+    # Cumulative sum of squared samples (prepend 0 for easy range sums)
+    x_sq_cs = np.concatenate(([0.0], np.cumsum(signal * signal)))
 
-    # Step 3: Absolute threshold — find first tau where cmnd < threshold
+    # Term 1: energy of first window x[0..W-1] (constant for all τ)
+    term1 = x_sq_cs[W]
+
+    # Term 2: energy of shifted window x[τ..τ+W-1] for each τ in [0, W)
+    term2 = x_sq_cs[W:2 * W] - x_sq_cs[:W]
+
+    # Term 3: cross-correlation via zero-padded FFT (linear, not circular)
+    fft_size = 1
+    while fft_size < N:
+        fft_size <<= 1
+    fft_size <<= 1
+
+    a = np.zeros(fft_size)
+    b = np.zeros(fft_size)
+    a[:W] = signal[:W]
+    b[:N] = signal[:N]
+    xcorr = np.fft.irfft(np.conj(np.fft.rfft(a)) * np.fft.rfft(b))[:W]
+
+    diff = term1 + term2 - 2.0 * xcorr
+    diff[0] = 0.0
+
+    # --- Cumulative mean normalized difference ---
+    cmnd = np.ones(W, dtype=np.float64)
+    running_sum = np.cumsum(diff[1:])
+    taus = np.arange(1, W, dtype=np.float64)
+    cmnd[1:] = np.where(running_sum > 0, diff[1:] * taus / running_sum, 1.0)
+
+    # --- Absolute threshold — find first τ where cmnd < threshold ---
     tau_estimate = -1
-    for tau in range(2, half):
+    for tau in range(2, W):
         if cmnd[tau] < threshold:
             # Find the local minimum from here
-            while tau + 1 < half and cmnd[tau + 1] < cmnd[tau]:
+            while tau + 1 < W and cmnd[tau + 1] < cmnd[tau]:
                 tau += 1
             tau_estimate = tau
             break
@@ -102,8 +122,8 @@ def _yin_pitch(signal, sample_rate, threshold=0.15):
     if tau_estimate < 0:
         return 0.0, 0.0
 
-    # Step 4: Parabolic interpolation for sub-sample accuracy
-    if 0 < tau_estimate < half - 1:
+    # --- Parabolic interpolation for sub-sample accuracy ---
+    if 0 < tau_estimate < W - 1:
         alpha = cmnd[tau_estimate - 1]
         beta = cmnd[tau_estimate]
         gamma = cmnd[tau_estimate + 1]
@@ -134,7 +154,12 @@ class TunerAudio:
         confidence  (float)        — 0.0 to 1.0
     """
 
-    def __init__(self, buffer_size=4096):
+    # Median filter window — odd number so median is always one of the samples
+    MEDIAN_WINDOW = 7
+    # Cents within this range snap to zero (reduces visual jitter near in-tune)
+    CENTS_DEAD_ZONE = 1.0
+
+    def __init__(self, buffer_size=8192):
         self.buffer_size = buffer_size
         self.sample_rate = 48000  # updated from JACK server in start()
 
@@ -148,6 +173,7 @@ class TunerAudio:
         # Smoothing state
         self._prev_cents = 0.0
         self._prev_note = None
+        self._freq_history = []
 
         # Internal
         self._client = None
@@ -257,6 +283,7 @@ class TunerAudio:
         self.cents = 0.0
         self.frequency = 0.0
         self.confidence = 0.0
+        self._freq_history.clear()
 
         logging.info("Tuner audio stopped")
 
@@ -284,27 +311,43 @@ class TunerAudio:
                 self.cents = 0.0
                 self.frequency = 0.0
                 self.confidence = 0.0
+                self._freq_history.clear()
+                self._prev_note = None
                 continue
 
             # Run YIN pitch detection
             freq, conf = _yin_pitch(buf.astype(np.float64), self.sample_rate)
 
             if freq > 0 and conf > 0.5:
-                note, octave, cents = _freq_to_note(freq)
+                # Median filter: collect recent frequencies, use median to
+                # reject outliers (e.g. occasional octave errors or noise spikes)
+                self._freq_history.append(freq)
+                if len(self._freq_history) > self.MEDIAN_WINDOW:
+                    self._freq_history.pop(0)
 
-                # Smooth cents using confidence-weighted EMA:
-                # High confidence (strong signal) -> alpha ~0.3 (moderately responsive)
-                # Low confidence (decaying signal) -> alpha ~0.05 (very stable)
+                if len(self._freq_history) >= 3:
+                    median_freq = float(np.median(self._freq_history))
+                else:
+                    median_freq = freq
+
+                note, octave, cents = _freq_to_note(median_freq)
+
+                # Smooth cents using confidence-weighted EMA when note is stable
                 if note == self._prev_note:
-                    alpha = 0.05 + 0.25 * conf * conf
+                    alpha = 0.1 + 0.3 * conf * conf
                     cents = alpha * cents + (1.0 - alpha) * self._prev_cents
+
+                # Dead zone: snap near-zero cents to exactly zero
+                if abs(cents) < self.CENTS_DEAD_ZONE:
+                    cents = 0.0
+
                 self._prev_cents = cents
                 self._prev_note = note
 
                 self.note_name = note
                 self.octave = octave
                 self.cents = cents
-                self.frequency = freq
+                self.frequency = median_freq
                 self.confidence = conf
             else:
                 self.note_name = None
@@ -312,4 +355,5 @@ class TunerAudio:
                 self.cents = 0.0
                 self.frequency = 0.0
                 self.confidence = 0.0
+                self._freq_history.clear()
                 self._prev_note = None
